@@ -29,6 +29,10 @@ import "errors"
 
 type UnknownNode struct{}
 
+func (UnknownNode) Stem() Stem {
+	return Stem{}
+}
+
 func (UnknownNode) Insert([]byte, []byte, NodeResolverFn) error {
 	return errMissingNodeInStateless
 }

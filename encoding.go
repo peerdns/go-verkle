@@ -84,7 +84,10 @@ func ParseNode(serializedNode []byte, depth byte) (VerkleNode, error) {
 		return nil, errSerializedPayloadTooShort
 	}
 
-	switch serializedNode[0] {
+	nodeType := serializedNode[0]
+	fmt.Printf("ParseNode: nodeType=%d, serializedNode=%x\n", nodeType, serializedNode)
+
+	switch nodeType {
 	case leafType:
 		return parseLeafNode(serializedNode, depth)
 	case internalType:
@@ -99,38 +102,63 @@ func ParseNode(serializedNode []byte, depth byte) (VerkleNode, error) {
 }
 
 func parseLeafNode(serialized []byte, depth byte) (VerkleNode, error) {
-	bitlist := serialized[leafBitlistOffset : leafBitlistOffset+bitlistSize]
+	// Ensure that we have enough data for the stem
+	stemEnd := leafStemOffset + StemSize
+	if len(serialized) < stemEnd {
+		return nil, fmt.Errorf("serialized data too short to contain stem")
+	}
+	stem := make([]byte, StemSize)
+	copy(stem, serialized[leafStemOffset:stemEnd])
+
+	// Ensure that we have enough data for the bitlist
+	bitlistEnd := leafBitlistOffset + bitlistSize
+	if len(serialized) < bitlistEnd {
+		return nil, fmt.Errorf("serialized data too short to contain bitlist")
+	}
+	bitlist := serialized[leafBitlistOffset:bitlistEnd]
+
+	// Ensure that we have enough data for the commitments
+	commitmentEnd := leafC2CommitmentOffset + banderwagon.UncompressedSize
+	if len(serialized) < commitmentEnd {
+		return nil, fmt.Errorf("serialized data too short to contain commitments")
+	}
+	commitmentBytes := serialized[leafCommitmentOffset : leafCommitmentOffset+banderwagon.UncompressedSize]
+	c1Bytes := serialized[leafC1CommitmentOffset : leafC1CommitmentOffset+banderwagon.UncompressedSize]
+	c2Bytes := serialized[leafC2CommitmentOffset : leafC2CommitmentOffset+banderwagon.UncompressedSize]
+
+	// Initialize the leaf node
 	var values [NodeWidth][]byte
+	ln := NewLeafNodeWithNoComms(stem, values[:])
+	ln.setDepth(depth)
+
+	// Set commitments
+	ln.commitment = new(Point)
+	if err := ln.commitment.SetBytesUncompressed(commitmentBytes, true); err != nil {
+		return nil, fmt.Errorf("setting commitment: %w", err)
+	}
+
+	ln.c1 = new(Point)
+	if err := ln.c1.SetBytesUncompressed(c1Bytes, true); err != nil {
+		return nil, fmt.Errorf("setting c1 commitment: %w", err)
+	}
+
+	ln.c2 = new(Point)
+	if err := ln.c2.SetBytesUncompressed(c2Bytes, true); err != nil {
+		return nil, fmt.Errorf("setting c2 commitment: %w", err)
+	}
+
+	// Now parse the children
 	offset := leafChildrenOffset
 	for i := 0; i < NodeWidth; i++ {
 		if bit(bitlist, i) {
 			if offset+LeafValueSize > len(serialized) {
-				return nil, fmt.Errorf("verkle payload is too short, need at least %d and only have %d, payload = %x (%w)", offset+LeafValueSize, len(serialized), serialized, errSerializedPayloadTooShort)
+				return nil, fmt.Errorf("not enough data to read value at index %d", i)
 			}
-			values[i] = serialized[offset : offset+LeafValueSize]
+			ln.values[i] = serialized[offset : offset+LeafValueSize]
 			offset += LeafValueSize
 		}
 	}
-	ln := NewLeafNodeWithNoComms(serialized[leafStemOffset:leafStemOffset+StemSize], values[:])
-	ln.setDepth(depth)
-	ln.c1 = new(Point)
 
-	// Sanity check that we have at least 3*banderwagon.UncompressedSize bytes left in the serialized payload.
-	if len(serialized[leafCommitmentOffset:]) < 3*banderwagon.UncompressedSize {
-		return nil, fmt.Errorf("leaf node commitments are not the correct size, expected at least %d, got %d", 3*banderwagon.UncompressedSize, len(serialized[leafC1CommitmentOffset:]))
-	}
-
-	if err := ln.c1.SetBytesUncompressed(serialized[leafC1CommitmentOffset:leafC1CommitmentOffset+banderwagon.UncompressedSize], true); err != nil {
-		return nil, fmt.Errorf("setting c1 commitment: %w", err)
-	}
-	ln.c2 = new(Point)
-	if err := ln.c2.SetBytesUncompressed(serialized[leafC2CommitmentOffset:leafC2CommitmentOffset+banderwagon.UncompressedSize], true); err != nil {
-		return nil, fmt.Errorf("setting c2 commitment: %w", err)
-	}
-	ln.commitment = new(Point)
-	if err := ln.commitment.SetBytesUncompressed(serialized[leafCommitmentOffset:leafC1CommitmentOffset], true); err != nil {
-		return nil, fmt.Errorf("setting commitment: %w", err)
-	}
 	return ln, nil
 }
 

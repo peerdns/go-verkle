@@ -31,6 +31,10 @@ type Empty struct{}
 
 var errDirectInsertIntoEmptyNode = errors.New("an empty node should not be inserted directly into")
 
+func (Empty) Stem() Stem {
+	return Stem{}
+}
+
 func (Empty) Insert([]byte, []byte, NodeResolverFn) error {
 	return errDirectInsertIntoEmptyNode
 }

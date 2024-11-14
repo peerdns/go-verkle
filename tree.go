@@ -66,6 +66,8 @@ func KeyToStem(key []byte) Stem {
 }
 
 type VerkleNode interface {
+	Stem() Stem
+
 	// Insert or Update value into the tree
 	Insert([]byte, []byte, NodeResolverFn) error
 
@@ -203,6 +205,10 @@ type (
 	}
 )
 
+func (n *InternalNode) Stem() Stem {
+	return Stem{}
+}
+
 func (n *InternalNode) toExportable() *ExportableInternalNode {
 	comm := n.commitment.Bytes()
 	exportable := &ExportableInternalNode{
@@ -324,6 +330,9 @@ func NewLeafNode(stem Stem, values [][]byte) (*LeafNode, error) {
 // commitments. The created node's commitments are intended to be
 // initialized with `SetTrustedBytes` in a deserialization context.
 func NewLeafNodeWithNoComms(stem Stem, values [][]byte) *LeafNode {
+	stemCopy := make([]byte, len(stem))
+	copy(stemCopy, stem)
+	fmt.Printf("NewLeafNodeWithNoComms: stem=%x - values: %x\n", stemCopy, values)
 	return &LeafNode{
 		// depth will be 0, but the commitment calculation
 		// does not need it, and so it won't be free.
@@ -356,12 +365,34 @@ func (n *InternalNode) cowChild(index byte) {
 		n.cow[index] = new(Point)
 		n.cow[index].Set(n.children[index].Commitment())
 	}
+
+	fmt.Println(
+		"Internal node cow child executed",
+		"index", index,
+		"cow_info", n.cow,
+	)
 }
 
 func (n *InternalNode) Insert(key []byte, value []byte, resolver NodeResolverFn) error {
+	if len(key) != 32 {
+		return fmt.Errorf("invalid key length: expected 32 bytes, got %d", len(key))
+	}
+
+	fmt.Println(
+		"About to attempt to insert new value @ internal node",
+		"full_key", fmt.Sprintf("%x", key),
+		"stem", fmt.Sprintf("%x", KeyToStem(key)),
+	)
+
+	stem := KeyToStem(key) // Extract the first 31 bytes as the stem
+	suffix := key[31]      // Extract the last byte as the suffix
+
+	fmt.Printf("Stem: %x, Suffix: %x\n", stem, suffix)
+
 	values := make([][]byte, NodeWidth)
-	values[key[StemSize]] = value
-	return n.InsertValuesAtStem(KeyToStem(key), values, resolver)
+	values[suffix] = value
+
+	return n.InsertValuesAtStem(stem, values, resolver)
 }
 
 func (n *InternalNode) InsertValuesAtStem(stem Stem, values [][]byte, resolver NodeResolverFn) error {
@@ -369,8 +400,10 @@ func (n *InternalNode) InsertValuesAtStem(stem Stem, values [][]byte, resolver N
 
 	switch child := n.children[nChild].(type) {
 	case UnknownNode:
+		fmt.Println("NODE INSERT", "UNKNOWN NODE")
 		return errMissingNodeInStateless
 	case Empty:
+		fmt.Println("NODE INSERT", "EMPTY NODE")
 		n.cowChild(nChild)
 		var err error
 		n.children[nChild], err = NewLeafNode(stem, values)
@@ -379,6 +412,7 @@ func (n *InternalNode) InsertValuesAtStem(stem Stem, values [][]byte, resolver N
 		}
 		n.children[nChild].setDepth(n.depth + 1)
 	case HashedNode:
+		fmt.Println("NODE INSERT", "HASHED NODE")
 		if resolver == nil {
 			return errInsertIntoHash
 		}
@@ -386,6 +420,14 @@ func (n *InternalNode) InsertValuesAtStem(stem Stem, values [][]byte, resolver N
 		if err != nil {
 			return fmt.Errorf("verkle tree: error resolving node %x at depth %d: %w", stem, n.depth, err)
 		}
+		fmt.Println(
+			"NODE INSERT",
+			"stem", fmt.Sprintf("%x", stem),
+			"values", values,
+			"resolver", resolver,
+			"n_child", fmt.Sprintf("%x", nChild),
+			"serialized_node", serialized,
+		)
 		resolved, err := ParseNode(serialized, n.depth+1)
 		if err != nil {
 			return fmt.Errorf("verkle tree: error parsing resolved node %x: %w", stem, err)
@@ -396,14 +438,43 @@ func (n *InternalNode) InsertValuesAtStem(stem Stem, values [][]byte, resolver N
 		// splits.
 		return n.InsertValuesAtStem(stem, values, resolver)
 	case *LeafNode:
+		fmt.Println(
+			"NODE INSERT", "LEAF NODE",
+			"stem", fmt.Sprintf("%x", stem),
+			"values", values,
+			"resolver", resolver,
+			"n_child", fmt.Sprintf("%x", nChild),
+		)
+
 		if equalPaths(child.stem, stem) {
+			fmt.Println(
+				"While inserting paths are equal",
+				"child_stem", fmt.Sprintf("%x", child.stem),
+				"stem", fmt.Sprintf("%x", stem),
+				"isPOAStub", child.isPOAStub,
+			)
 			// We can't insert any values into a POA leaf node.
 			if child.isPOAStub {
 				return errIsPOAStub
 			}
 			n.cowChild(nChild)
 			return child.insertMultiple(stem, values)
+		} else {
+			fmt.Println(
+				"While inserting paths are NOT equal",
+				"child_stem", fmt.Sprintf("%x", child.stem),
+				"stem", fmt.Sprintf("%x", stem),
+				"isPOAStub", child.isPOAStub,
+			)
 		}
+
+		fmt.Println(
+			"NOT EQUAL STEM PATHS - CONSTRUCTING NEW BRANCH",
+			"child_stem", fmt.Sprintf("%x", child.stem),
+			"stem", fmt.Sprintf("%x", stem),
+			"isPOAStub", child.isPOAStub,
+		)
+
 		n.cowChild(nChild)
 
 		// A new branch node has to be inserted. Depending
@@ -414,7 +485,9 @@ func (n *InternalNode) InsertValuesAtStem(stem Stem, values [][]byte, resolver N
 		newBranch.cowChild(nextWordInExistingKey)
 		n.children[nChild] = newBranch
 		newBranch.children[nextWordInExistingKey] = child
-		child.depth += 1
+
+		// Correctly set the depth of the existing leaf node
+		child.setDepth(n.depth + 2) // child.depth += 1
 
 		nextWordInInsertedKey := offset2key(stem, n.depth+1)
 		if nextWordInInsertedKey == nextWordInExistingKey {
@@ -544,14 +617,55 @@ func (n *InternalNode) CreatePath(path []byte, stemInfo stemInfo, comms []*Point
 // The returned slice is internal to the tree, so it *must* be considered readonly
 // for callers.
 func (n *InternalNode) GetValuesAtStem(stem Stem, resolver NodeResolverFn) ([][]byte, error) {
+	fmt.Printf("GetValuesAtStem: stem=%x - depth: %d\n", stem, n.depth)
 	nchild := offset2key(stem, n.depth) // index of the child pointed by the next byte in the key
+
+	for _, tChild := range n.children {
+		switch child := tChild.(type) {
+		case *LeafNode, *InternalNode:
+			fmt.Println(
+				"Children",
+				"stem", fmt.Sprintf("%x", stem), "hash", tChild.Hash(),
+				"commitment", fmt.Sprintf("%x", tChild.Commitment().Bytes()),
+			)
+		case HashedNode:
+			if resolver == nil {
+				return nil, fmt.Errorf("hashed node %x at depth %d along stem %x could not be resolved: %w", child.Commitment().Bytes(), n.depth, stem, errReadFromInvalid)
+			}
+			serialized, err := resolver(stem[:n.depth+1])
+			if err != nil {
+				return nil, fmt.Errorf("resolving node %x at depth %d: %w", stem, n.depth, err)
+			}
+			resolved, err := ParseNode(serialized, n.depth+1)
+			if err != nil {
+				return nil, fmt.Errorf("verkle tree: error parsing resolved node %x: %w", stem, err)
+			}
+			fmt.Println(
+				"Children", "hashed",
+				"stem", fmt.Sprintf("%x", stem), "hash", resolved.Hash(),
+				"commitment", fmt.Sprintf("%x", resolved.Commitment().Bytes()),
+			)
+		}
+	}
+
 	switch child := n.children[nchild].(type) {
 	case UnknownNode:
+		fmt.Println(
+			"GetValuesAtStem: unknown node",
+			"stem key", fmt.Sprintf("%x", stem),
+			"resolver", resolver,
+		)
 		return nil, errMissingNodeInStateless
 	case Empty:
+		fmt.Println(
+			"GetValuesAtStem: empty node",
+			"stem key", fmt.Sprintf("%x", stem),
+			"resolver", resolver,
+		)
 		return nil, nil
 	case HashedNode:
 		if resolver == nil {
+			// TODO: Potential bug is here... HashedNode does not have a commitment - might end up as panic.
 			return nil, fmt.Errorf("hashed node %x at depth %d along stem %x could not be resolved: %w", child.Commitment().Bytes(), n.depth, stem, errReadFromInvalid)
 		}
 		serialized, err := resolver(stem[:n.depth+1])
@@ -565,20 +679,53 @@ func (n *InternalNode) GetValuesAtStem(stem Stem, resolver NodeResolverFn) ([][]
 		n.children[nchild] = resolved
 		// recurse to handle the case of a LeafNode child that
 		// splits.
+		fmt.Println(
+			"GetValuesAtStem: hashed node",
+			"stem key", fmt.Sprintf("%x", stem),
+			"serialized hashed", fmt.Sprintf("%x", serialized),
+			"serialized resolved", fmt.Sprintf("%x", resolved.Hash().Bytes()),
+			"resolver", resolver,
+		)
 		return n.GetValuesAtStem(stem, resolver)
 	case *LeafNode:
 		if equalPaths(child.stem, stem) {
 			// We can't return the values since it's a POA leaf node, so we know nothing
 			// about its values.
 			if child.isPOAStub {
+				fmt.Println(
+					"GetValuesAtStem: leaf node - POA LEAF NODE EMPTY",
+					"child_stem_key", fmt.Sprintf("%x", child.stem),
+					"stem_key", fmt.Sprintf("%x", stem),
+					"resolver", resolver,
+				)
 				return nil, errIsPOAStub
 			}
+
+			fmt.Println(
+				"GetValuesAtStem: leaf node",
+				"child_stem_key", fmt.Sprintf("%x", child.stem),
+				"stem_key", fmt.Sprintf("%x", stem),
+				"resolver", resolver,
+				"values", fmt.Sprintf("%x", child.values),
+			)
 			return child.values, nil
 		}
+
+		fmt.Println(
+			"GetValuesAtStem: leaf node - NO EQUAL PATHS",
+			"child_stem_key", fmt.Sprintf("%x", child.stem),
+			"stem_key", fmt.Sprintf("%x", stem),
+			"resolver", resolver,
+		)
 		return nil, nil
 	case *InternalNode:
 		return child.GetValuesAtStem(stem, resolver)
 	default:
+		fmt.Println(
+			"GetValuesAtStem: leaf node - UNKNOWN NODE",
+			"stem key", fmt.Sprintf("%x", stem),
+			"resolver", resolver,
+		)
 		return nil, errUnknownNodeType
 	}
 }
@@ -764,9 +911,17 @@ func (n *InternalNode) FlushAtDepth(depth uint8, flush NodeFlushFn) {
 }
 
 func (n *InternalNode) Get(key []byte, resolver NodeResolverFn) ([]byte, error) {
+	fmt.Println("Internal node get requested", fmt.Sprintf("%x", key), resolver)
 	if len(key) != StemSize+1 {
 		return nil, fmt.Errorf("invalid key length, expected %d, got %d", StemSize+1, len(key))
 	}
+	fmt.Println(
+		"Internal node stem values",
+		"stem", fmt.Sprintf("%x", KeyToStem(key)),
+		"key", fmt.Sprintf("%x", key),
+		"resolver", resolver,
+	)
+
 	stemValues, err := n.GetValuesAtStem(KeyToStem(key), resolver)
 	if err != nil {
 		return nil, err
@@ -776,6 +931,13 @@ func (n *InternalNode) Get(key []byte, resolver NodeResolverFn) ([]byte, error) 
 	if stemValues == nil {
 		return nil, nil
 	}
+
+	fmt.Println(
+		"Internal node stem values return",
+		"stem", fmt.Sprintf("%x", KeyToStem(key)),
+		"resolver", resolver,
+		"secure trie return", stemValues[key[StemSize]],
+	)
 
 	// Return nil as a signal that the value isn't
 	// present in the tree. This matches the behavior
@@ -1146,6 +1308,10 @@ func (n *InternalNode) touchCoW(index byte) {
 	n.cowChild(index)
 }
 
+func (n *LeafNode) Stem() Stem {
+	return n.stem
+}
+
 func (n *LeafNode) Insert(key []byte, value []byte, _ NodeResolverFn) error {
 	if n.isPOAStub {
 		return errIsPOAStub
@@ -1161,6 +1327,12 @@ func (n *LeafNode) Insert(key []byte, value []byte, _ NodeResolverFn) error {
 	}
 	values := make([][]byte, NodeWidth)
 	values[key[StemSize]] = value
+
+	fmt.Println(
+		"About to attempt to insert new value @ leaf node",
+		"full_key", fmt.Sprintf("%x", key),
+		"stem", fmt.Sprintf("%x", stem),
+	)
 	return n.insertMultiple(stem, values)
 }
 
@@ -1169,6 +1341,13 @@ func (n *LeafNode) insertMultiple(stem Stem, values [][]byte) error {
 	if !equalPaths(stem, n.stem) {
 		return errInsertIntoOtherStem
 	}
+
+	fmt.Println(
+		"insertMultiple: Paths are equal continuing...",
+		"node_stem", fmt.Sprintf("%x", n.stem),
+		"argument_stem", fmt.Sprintf("%x", stem),
+		"argument_values", values,
+	)
 
 	return n.updateMultipleLeaves(values)
 }
@@ -1309,6 +1488,16 @@ func (n *LeafNode) updateMultipleLeaves(values [][]byte) error { // skipcq: GO-R
 		}
 		n.updateC(c2Idx, frs[0], frs[1])
 	}
+
+	fmt.Println(
+		"updateMultipleLeaves: Values after update",
+		"node_stem", fmt.Sprintf("%x", n.stem),
+		"depth", n.depth,
+		"c1", fmt.Sprintf("%x", n.c1.Bytes()),
+		"c2", fmt.Sprintf("%x", n.c2.Bytes()),
+		"commitment", fmt.Sprintf("%x", n.commitment.Bytes()),
+		"argument_values", values,
+	)
 
 	return nil
 }
@@ -1644,8 +1833,16 @@ func (n *LeafNode) GetProofItems(keys keylist, _ NodeResolverFn) (*ProofElements
 // Serialize serializes a LeafNode.
 // The format is: <nodeType><stem><bitlist><comm><c1comm><c2comm><children...>
 func (n *LeafNode) Serialize() ([]byte, error) {
+	// Log the stem before serialization
+	fmt.Printf("Before Serialize: stem=%x\n", n.stem)
+
 	cBytes := banderwagon.BatchToBytesUncompressed(n.commitment, n.c1, n.c2)
-	return n.serializeLeafWithUncompressedCommitments(cBytes[0], cBytes[1], cBytes[2]), nil
+	serialized := n.serializeLeafWithUncompressedCommitments(cBytes[0], cBytes[1], cBytes[2])
+
+	// Log the stem after serialization
+	fmt.Printf("After Serialize: %x\n", serialized[leafStemOffset:leafStemOffset+StemSize])
+
+	return serialized, nil
 }
 
 func (n *LeafNode) Copy() VerkleNode {
@@ -1774,6 +1971,7 @@ func (n *InternalNode) BatchSerialize() ([]SerializedNode, error) {
 				CommitmentBytes: serializedPoints[idx],
 				SerializedBytes: serialized,
 			}
+			fmt.Printf("BatchSerialize - InternalNode: path=%x\n", paths[idx])
 			ret = append(ret, sn)
 			idx++
 		case *LeafNode:
@@ -1786,6 +1984,7 @@ func (n *InternalNode) BatchSerialize() ([]SerializedNode, error) {
 				CommitmentBytes: serializedPoints[idx],
 				SerializedBytes: n.serializeLeafWithUncompressedCommitments(cBytes, c1Bytes, c2Bytes),
 			}
+			fmt.Printf("BatchSerialize - LeafNode: path=%x, stem=%x\n", paths[idx], n.stem)
 			ret = append(ret, sn)
 			idx += 3
 		}
@@ -1801,7 +2000,12 @@ func (n *InternalNode) collectNonHashedNodes(list []VerkleNode, paths [][]byte, 
 		switch childNode := child.(type) {
 		case *LeafNode:
 			list = append(list, childNode)
-			paths = append(paths, childNode.stem[:len(path)+1])
+			// Correctly construct the path for the leaf node
+			leafPath := make([]byte, len(path)+1)
+			copy(leafPath, path)
+			leafPath[len(path)] = byte(i)
+			fmt.Printf("collectNonHashedNodes - LeafNode: path=%x, leaf_stem=%x\n", leafPath, childNode.stem)
+			paths = append(paths, leafPath)
 		case *InternalNode:
 			childpath := make([]byte, len(path)+1)
 			copy(childpath, path)
@@ -1881,6 +2085,7 @@ func (n *LeafNode) serializeLeafWithUncompressedCommitments(cBytes, c1Bytes, c2B
 		result = buf[:]
 		result[0] = singleSlotType
 		copy(result[leafStemOffset:], n.stem[:StemSize])
+		fmt.Printf("Serialize - SingleSlot Stem: %x at offset %d\n", n.stem, leafStemOffset)
 		if lastIdx < 128 {
 			copy(result[leafStemOffset+StemSize:], c1Bytes[:])
 		} else {
@@ -1894,6 +2099,7 @@ func (n *LeafNode) serializeLeafWithUncompressedCommitments(cBytes, c1Bytes, c2B
 		result = buf[:]
 		result[0] = eoAccountType
 		copy(result[leafStemOffset:], n.stem[:StemSize])
+		fmt.Printf("Serialize - EoAccount Stem: %x at offset %d\n", n.stem, leafStemOffset)
 		copy(result[leafStemOffset+StemSize:], c1Bytes[:])
 		copy(result[leafStemOffset+StemSize+banderwagon.UncompressedSize:], cBytes[:])
 		copy(result[leafStemOffset+StemSize+2*banderwagon.UncompressedSize:], n.values[0]) // copy basic data
@@ -1901,6 +2107,7 @@ func (n *LeafNode) serializeLeafWithUncompressedCommitments(cBytes, c1Bytes, c2B
 		result = make([]byte, nodeTypeSize+StemSize+bitlistSize+3*banderwagon.UncompressedSize+len(children))
 		result[0] = leafType
 		copy(result[leafStemOffset:], n.stem[:StemSize])
+		fmt.Printf("Serialize - Leaf Stem: %x at offset %d\n", n.stem, leafStemOffset)
 		copy(result[leafBitlistOffset:], bitlist[:])
 		copy(result[leafCommitmentOffset:], cBytes[:])
 		copy(result[leafC1CommitmentOffset:], c1Bytes[:])

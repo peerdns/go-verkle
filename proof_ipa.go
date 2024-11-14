@@ -269,8 +269,8 @@ func MakeVerkleMultiProof(preroot, postroot VerkleNode, keys [][]byte, resolver 
 }
 
 // verifyVerkleProofWithPreState takes a proof and a trusted tree root and verifies that the proof is valid.
-func verifyVerkleProofWithPreState(proof *Proof, preroot VerkleNode) error {
-	pe, _, _, _, err := getProofElementsFromTree(preroot, nil, proof.Keys, nil)
+func verifyVerkleProofWithPreState(proof *Proof, preroot VerkleNode, resolver NodeResolverFn) error {
+	pe, _, _, _, err := getProofElementsFromTree(preroot, nil, proof.Keys, resolver)
 	if err != nil {
 		return fmt.Errorf("error getting proof elements: %w", err)
 	}
@@ -585,7 +585,7 @@ func PreStateTreeFromProof(proof *Proof, rootC *Point) (VerkleNode, error) { // 
 
 // PostStateTreeFromProof uses the pre-state trie and the list of updated values
 // to produce the stateless post-state trie.
-func PostStateTreeFromStateDiff(preroot VerkleNode, statediff StateDiff) (VerkleNode, error) {
+func PostStateTreeFromStateDiff(preroot VerkleNode, statediff StateDiff, resolver NodeResolverFn) (VerkleNode, error) {
 	postroot := preroot.Copy()
 
 	for _, stemstatediff := range statediff {
@@ -606,7 +606,7 @@ func PostStateTreeFromStateDiff(preroot VerkleNode, statediff StateDiff) (Verkle
 		if overwrites {
 			var stem [StemSize]byte
 			copy(stem[:StemSize], stemstatediff.Stem[:])
-			if err := postroot.(*InternalNode).InsertValuesAtStem(stem[:], values, nil); err != nil {
+			if err := postroot.(*InternalNode).InsertValuesAtStem(stem[:], values, resolver); err != nil {
 				return nil, fmt.Errorf("error overwriting value in post state: %w", err)
 			}
 		}
@@ -623,23 +623,27 @@ func (x bytesSlice) Less(i, j int) bool { return bytes.Compare(x[i], x[j]) < 0 }
 func (x bytesSlice) Swap(i, j int)      { x[i], x[j] = x[j], x[i] }
 
 // Verify is the API function that verifies a verkle proofs as found in a block/execution payload.
-func Verify(vp *VerkleProof, preStateRoot []byte, postStateRoot []byte, statediff StateDiff) error {
+func Verify(vp *VerkleProof, preStateRoot []byte, postStateRoot []byte, statediff StateDiff, resolver NodeResolverFn) error {
 
+	fmt.Println("INSERTED HERE 1")
 	proof, err := DeserializeProof(vp, statediff)
 	if err != nil {
 		return fmt.Errorf("verkle proof deserialization error: %w", err)
 	}
-
+	fmt.Println("INSERTED HERE 2")
 	rootC := new(Point)
 	if err := rootC.SetBytes(preStateRoot); err != nil {
 		return fmt.Errorf("error setting prestate root: %w", err)
 	}
+	fmt.Println("INSERTED HERE 3")
 	pretree, err := PreStateTreeFromProof(proof, rootC)
 	if err != nil {
 		return fmt.Errorf("error rebuilding the pre-tree from proof: %w", err)
 	}
 	// TODO this should not be necessary, remove it
 	// after the new proof generation code has stabilized.
+
+	fmt.Println("INSERTED HERE 4")
 	for _, stemdiff := range statediff {
 		for _, suffixdiff := range stemdiff.SuffixDiffs {
 			var key [32]byte
@@ -666,14 +670,16 @@ func Verify(vp *VerkleProof, preStateRoot []byte, postStateRoot []byte, statedif
 	// But all this can be avoided with a even faster way. The EVM block execution can
 	// keep track of the written keys, and compare that list with this post-values list.
 	// This can avoid regenerating the post-tree which is somewhat expensive.
-	posttree, err := PostStateTreeFromStateDiff(pretree, statediff)
+	fmt.Println("INSERTED HERE 5")
+	posttree, err := PostStateTreeFromStateDiff(pretree, statediff, resolver)
 	if err != nil {
 		return fmt.Errorf("error rebuilding the post-tree from proof: %w", err)
 	}
+	fmt.Println("INSERTED HERE 6")
 	regeneratedPostTreeRoot := posttree.Commitment().Bytes()
 	if !bytes.Equal(regeneratedPostTreeRoot[:], postStateRoot) {
 		return fmt.Errorf("post tree root mismatch: %x != %x", regeneratedPostTreeRoot, postStateRoot)
 	}
 
-	return verifyVerkleProofWithPreState(proof, pretree)
+	return verifyVerkleProofWithPreState(proof, pretree, resolver)
 }

@@ -32,6 +32,10 @@ import (
 
 type HashedNode struct{}
 
+func (HashedNode) Stem() Stem {
+	return Stem{}
+}
+
 func (HashedNode) Insert([]byte, []byte, NodeResolverFn) error {
 	return errInsertIntoHash
 }
